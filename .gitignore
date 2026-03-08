@@ -1,0 +1,19 @@
+# Rust build output
+/target/
+
+# Local app/runtime data
+/data/*.sqlite
+/data/*.db
+/data/*.txt
+
+# Local caches and scratch dirs
+/.cache/
+/.tmp/
+
+# Local config and logs
+*.local.json
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

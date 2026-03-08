@@ -1,0 +1,83 @@
+name: Release Windows EXE
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version label for artifact naming (example: v0.1.0-dev1)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build -p vrl-osc-core --bin vibealong --release
+
+      - name: Resolve version label
+        id: meta
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            $version = $env:GITHUB_REF_NAME
+          } elseif ("${{ inputs.version }}" -ne "") {
+            $version = "${{ inputs.version }}"
+          } else {
+            $version = "manual-" + (Get-Date -Format "yyyyMMddHHmmss")
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Package artifacts and checksums
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+
+          $exeName = "Vibealong-$version.exe"
+          $zipName = "Vibealong-$version-windows-x64.zip"
+
+          Copy-Item "target/release/vibealong.exe" "dist/$exeName" -Force
+          Compress-Archive -Path "dist/$exeName" -DestinationPath "dist/$zipName" -Force
+
+          $exeHash = (Get-FileHash "dist/$exeName" -Algorithm SHA256).Hash.ToLower()
+          $zipHash = (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower()
+
+          @"
+          $exeHash  $exeName
+          $zipHash  $zipName
+          "@ | Out-File "dist/SHA256SUMS.txt" -Encoding ascii
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibealong-${{ steps.meta.outputs.version }}-windows
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Vibealong ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/Vibealong-${{ steps.meta.outputs.version }}.exe
+            dist/Vibealong-${{ steps.meta.outputs.version }}-windows-x64.zip
+            dist/SHA256SUMS.txt

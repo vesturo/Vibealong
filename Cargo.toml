@@ -1,0 +1,4 @@
+[workspace]
+members = ["packages/core-rs"]
+resolver = "2"
+

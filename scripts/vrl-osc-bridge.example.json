@@ -1,0 +1,59 @@
+{
+  "websiteBaseUrl": "https://dev.vrlewds.com",
+  "creatorUsername": "Vee",
+  "streamKey": "dev_xxx_replace_with_real_stream_key",
+  "allowInsecureHttp": false,
+  "oscListen": {
+    "host": "127.0.0.1",
+    "port": 9001
+  },
+  "forwardTargets": [
+    {
+      "host": "127.0.0.1",
+      "port": 9000
+    }
+  ],
+  "inputs": [
+    {
+      "address": "/avatar/parameters/SPS_Contact",
+      "weight": 1,
+      "curve": "linear",
+      "invert": false,
+      "deadzone": 0.02,
+      "min": 0,
+      "max": 1
+    },
+    {
+      "address": "/avatar/parameters/SPS_Pump",
+      "weight": 0.7,
+      "curve": "easeOutQuad",
+      "invert": false,
+      "deadzone": 0.05,
+      "min": 0,
+      "max": 1
+    }
+  ],
+  "output": {
+    "emitHz": 20,
+    "attackMs": 55,
+    "releaseMs": 220,
+    "emaAlpha": 0.35,
+    "minDelta": 0.015,
+    "heartbeatMs": 1000
+  },
+  "relay": {
+    "sessionPath": "/api/sps/session",
+    "ingestPath": "/api/sps/ingest"
+  },
+  "debug": {
+    "logOsc": false,
+    "logUnmappedOnly": false,
+    "logConfiguredOnly": false,
+    "logRelay": false
+  },
+  "discovery": {
+    "enabled": false,
+    "filePath": "scripts/vrl-osc-discovered.txt",
+    "includeArgTypes": false
+  }
+}
