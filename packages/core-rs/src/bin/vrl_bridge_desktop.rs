@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -356,9 +357,40 @@ fn append_tray_debug_log(message: &str) {
 }
 
 fn open_url_in_system_browser(url: &str) -> Result<(), String> {
-    webbrowser::open(url)
-        .map(|_| ())
-        .map_err(|err| format!("failed to open system browser: {err}"))
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer a native shell launch on Windows to avoid occasional URL handler
+        // mis-routing where browser URLs can open in Explorer.
+        match Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                let windows_err = format!("cmd start exited with status {status}");
+                return webbrowser::open(url).map(|_| ()).map_err(|err| {
+                    format!(
+                        "failed to open system browser ({windows_err}; webbrowser fallback failed: {err})"
+                    )
+                });
+            }
+            Err(err) => {
+                let windows_err = format!("cmd start failed: {err}");
+                return webbrowser::open(url).map(|_| ()).map_err(|fallback_err| {
+                    format!(
+                        "failed to open system browser ({windows_err}; webbrowser fallback failed: {fallback_err})"
+                    )
+                });
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        webbrowser::open(url)
+            .map(|_| ())
+            .map_err(|err| format!("failed to open system browser: {err}"))
+    }
 }
 
 fn build_http_response(status_line: &str, html_body: &str) -> String {
@@ -1201,7 +1233,7 @@ impl DesktopApp {
             runtime_snapshot: None,
             runtime_logs: Vec::new(),
             avatar_params: Vec::new(),
-            show_all_avatar_params: false,
+            show_all_avatar_params: true,
             last_runtime_refresh: Instant::now() - Duration::from_secs(1),
             diagnostics: VrchatDiagnostics::default(),
             diagnostics_shared,
@@ -1503,6 +1535,70 @@ impl DesktopApp {
         }
     }
 
+    fn render_detected_vrchat_osc_target_hint(&mut self, ui: &mut egui::Ui) {
+        let detected = self
+            .diagnostics
+            .osc_output_host
+            .as_ref()
+            .zip(self.diagnostics.osc_output_port)
+            .map(|(host, port)| (host.clone(), port));
+        let Some((detected_host, detected_port)) = detected else {
+            return;
+        };
+
+        let current_host = self.form.osc_host.trim().to_string();
+        let current_port = self.form.osc_port.trim().to_string();
+        let detected_port_text = detected_port.to_string();
+        let matches_detected =
+            current_host == detected_host && current_port == detected_port_text;
+
+        ui.group(|ui| {
+            ui.label(format!(
+                "Detected VRChat OSC target: {}:{}",
+                detected_host, detected_port
+            ));
+            if let Some(arg) = self.diagnostics.osc_launch_arg.as_deref() {
+                ui.monospace(format!("--osc={arg}"));
+            }
+            ui.horizontal_wrapped(|ui| {
+                if matches_detected {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(110, 220, 150),
+                        "Current OSC host/port matches VRChat target.",
+                    );
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 180, 70),
+                        format!(
+                            "Current listen target is {}:{} (mismatch).",
+                            if current_host.is_empty() {
+                                "<empty>"
+                            } else {
+                                current_host.as_str()
+                            },
+                            if current_port.is_empty() {
+                                "<empty>"
+                            } else {
+                                current_port.as_str()
+                            }
+                        ),
+                    );
+                    if ui.button("Apply detected target").clicked() {
+                        self.form.osc_host = detected_host.clone();
+                        self.form.osc_port = detected_port_text.clone();
+                        self.set_status(
+                            format!(
+                                "Applied VRChat OSC target {}:{}; save profile/settings to persist.",
+                                detected_host, detected_port
+                            ),
+                            false,
+                        );
+                    }
+                }
+            });
+        });
+    }
+
     fn request_diagnostics_refresh(&self) {
         let _ = self.diagnostics_refresh_tx.send(());
     }
@@ -1560,13 +1656,16 @@ impl DesktopApp {
                     return;
                 }
                 match self.service.start_profile(&profile_id) {
-                    Ok(_) => self.set_status(
-                        format!(
-                            "Bridge auto-engaged for {} (stream live)",
-                            expected_request.creator_username
-                        ),
-                        false,
-                    ),
+                    Ok(_) => {
+                        self.next_auto_bridge_attempt_at = Instant::now();
+                        self.set_status(
+                            format!(
+                                "Bridge auto-engaged for {} (stream live)",
+                                expected_request.creator_username
+                            ),
+                            false,
+                        )
+                    }
                     Err(err) => {
                         self.next_auto_bridge_attempt_at = Instant::now() + Duration::from_secs(5);
                         self.set_status(format!("Auto-engage failed: {err}"), true);
@@ -1574,16 +1673,23 @@ impl DesktopApp {
                 }
             }
             Some(false) => {
-                if self.runtime_running() {
-                    match self.service.stop_runtime() {
-                        Ok(_) => self.set_status(
+                if self.runtime_running() || Instant::now() < self.next_auto_bridge_attempt_at {
+                    return;
+                }
+                match self.service.start_profile(&profile_id) {
+                    Ok(_) => {
+                        self.next_auto_bridge_attempt_at = Instant::now();
+                        self.set_status(
                             format!(
-                                "Bridge auto-disengaged for {} (stream offline)",
+                                "Bridge engaged for {} (offline preview mode; relay will reconnect when live)",
                                 expected_request.creator_username
                             ),
                             false,
-                        ),
-                        Err(err) => self.set_status(format!("Auto-disengage failed: {err}"), true),
+                        )
+                    }
+                    Err(err) => {
+                        self.next_auto_bridge_attempt_at = Instant::now() + Duration::from_secs(5);
+                        self.set_status(format!("Offline preview engage failed: {err}"), true);
                     }
                 }
             }
@@ -1610,8 +1716,21 @@ impl DesktopApp {
         self.auto_bridge_enabled = true;
         self.next_auto_bridge_attempt_at = Instant::now();
         self.sync_live_gate_worker_request(true);
+        if let Some(profile_id) = self.selected_profile_id.clone() {
+            match self.service.start_profile(&profile_id) {
+                Ok(_) => self.set_status(
+                    format!("Bridge auto mode enabled and runtime engaged ({source})"),
+                    false,
+                ),
+                Err(err) => self.set_status(
+                    format!(
+                        "Bridge auto mode enabled ({source}), runtime engage pending live gate: {err}"
+                    ),
+                    true,
+                ),
+            }
+        }
         self.sync_tray_bridge_shared();
-        self.set_status(format!("Bridge auto mode enabled ({source})"), false);
     }
 
     fn disable_bridge_auto_mode(&mut self, source: &str) {
@@ -1741,6 +1860,9 @@ impl DesktopApp {
                 return;
             }
         };
+        append_tray_debug_log(&format!(
+            "companion-login-start url={login_url} callback={callback_url}"
+        ));
 
         match open_url_in_system_browser(&login_url) {
             Ok(_) => {
@@ -1757,6 +1879,7 @@ impl DesktopApp {
                 );
             }
             Err(err) => {
+                append_tray_debug_log(&format!("companion-login-open-failed: {err}"));
                 self.set_status(
                     format!("Failed to open browser: {err}. Open manually: {login_url}"),
                     true,
@@ -1767,6 +1890,15 @@ impl DesktopApp {
 
     fn apply_companion_browser_auth_result(&mut self, result: CompanionBrowserAuthResult) {
         if let Some(error) = result.error {
+            append_tray_debug_log(&format!(
+                "companion-login-result-error state={} mode={:?} creator={:?} stream_id={:?} offline={} error={}",
+                result.state,
+                result.mode,
+                result.creator_username,
+                result.stream_id,
+                result.creator_offline,
+                error
+            ));
             self.set_status(format!("Companion login failed: {error}"), true);
             return;
         }
@@ -1824,6 +1956,14 @@ impl DesktopApp {
                 ),
                 false,
             );
+            append_tray_debug_log(&format!(
+                "companion-login-result-success state={} mode={:?} creator={:?} stream_id={:?} offline={}",
+                result.state,
+                result.mode,
+                result.creator_username,
+                result.stream_id,
+                result.creator_offline
+            ));
         }
     }
 
@@ -1865,6 +2005,10 @@ impl DesktopApp {
         self.pending_companion_auth = None;
 
         if expected_state.is_empty() || result.state != expected_state {
+            append_tray_debug_log(&format!(
+                "companion-login-state-mismatch expected={} actual={}",
+                expected_state, result.state
+            ));
             self.set_status("Companion login failed: state mismatch", true);
             return;
         }
@@ -3081,6 +3225,7 @@ impl DesktopApp {
                 ui.label("OSC Port");
                 ui.text_edit_singleline(&mut self.form.osc_port);
             });
+            self.render_detected_vrchat_osc_target_hint(right);
             right.checkbox(
                 &mut self.form.allow_network_osc,
                 "Allow network OSC (non-loopback)",
@@ -3228,6 +3373,22 @@ impl DesktopApp {
             }
         }
         ui.separator();
+        if let Some(snapshot) = &self.runtime_snapshot {
+            if snapshot.osc_packets_received == 0 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 180, 70),
+                    "No OSC packets received yet. Check OSC host/port and that VRChat OSC is enabled.",
+                );
+            } else if snapshot.osc_messages_received > 0
+                && snapshot.mapped_messages_received == 0
+                && !self.form.mappings.is_empty()
+            {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 180, 70),
+                    "OSC is flowing, but no mapped messages matched. Add mapping from discovered params or update mapping addresses.",
+                );
+            }
+        }
         ui.columns(2, |columns| {
             let left = &mut columns[0];
             left.heading("Discovered Params");
@@ -3448,6 +3609,7 @@ impl DesktopApp {
             ui.label("OSC Port");
             ui.text_edit_singleline(&mut self.form.osc_port);
         });
+        self.render_detected_vrchat_osc_target_hint(ui);
         ui.checkbox(
             &mut self.form.allow_network_osc,
             "Allow network OSC (non-loopback)",
@@ -3515,6 +3677,31 @@ impl DesktopApp {
             "OSCQuery port from VRChat log: {}",
             self.diagnostics
                 .oscquery_port_from_logs
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ));
+        ui.label(format!(
+            "VRChat --osc launch arg: {}",
+            self.diagnostics
+                .osc_launch_arg
+                .clone()
+                .unwrap_or_else(|| "-".to_string())
+        ));
+        ui.label(format!(
+            "VRChat OSC input port: {}",
+            self.diagnostics
+                .osc_input_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ));
+        ui.label(format!(
+            "VRChat OSC output target: {}:{}",
+            self.diagnostics
+                .osc_output_host
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            self.diagnostics
+                .osc_output_port
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "-".to_string())
         ));

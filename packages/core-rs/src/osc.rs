@@ -1,7 +1,9 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum OscArg {
     Int(i32),
+    Int64(i64),
     Float(f32),
+    Double(f64),
     Bool(bool),
     Str(String),
 }
@@ -52,6 +54,32 @@ fn read_f32_be(packet: &[u8], offset: usize) -> f32 {
     ]))
 }
 
+fn read_i64_be(packet: &[u8], offset: usize) -> i64 {
+    i64::from_be_bytes([
+        packet[offset],
+        packet[offset + 1],
+        packet[offset + 2],
+        packet[offset + 3],
+        packet[offset + 4],
+        packet[offset + 5],
+        packet[offset + 6],
+        packet[offset + 7],
+    ])
+}
+
+fn read_f64_be(packet: &[u8], offset: usize) -> f64 {
+    f64::from_bits(u64::from_be_bytes([
+        packet[offset],
+        packet[offset + 1],
+        packet[offset + 2],
+        packet[offset + 3],
+        packet[offset + 4],
+        packet[offset + 5],
+        packet[offset + 6],
+        packet[offset + 7],
+    ]))
+}
+
 fn parse_osc_message(packet: &[u8], offset: usize) -> Option<OscMessage> {
     let (address, next_after_address) = read_osc_string(packet, offset)?;
     let (type_tag, mut cursor) = read_osc_string(packet, next_after_address)?;
@@ -75,6 +103,20 @@ fn parse_osc_message(packet: &[u8], offset: usize) -> Option<OscMessage> {
                 }
                 args.push(OscArg::Float(read_f32_be(packet, cursor)));
                 cursor += 4;
+            }
+            'h' => {
+                if cursor + 8 > packet.len() {
+                    return None;
+                }
+                args.push(OscArg::Int64(read_i64_be(packet, cursor)));
+                cursor += 8;
+            }
+            'd' => {
+                if cursor + 8 > packet.len() {
+                    return None;
+                }
+                args.push(OscArg::Double(read_f64_be(packet, cursor)));
+                cursor += 8;
             }
             'T' => args.push(OscArg::Bool(true)),
             'F' => args.push(OscArg::Bool(false)),
@@ -133,7 +175,9 @@ pub fn extract_numeric_arg(args: &[OscArg]) -> Option<f64> {
     for arg in args {
         match arg {
             OscArg::Int(value) => return Some(*value as f64),
+            OscArg::Int64(value) => return Some(*value as f64),
             OscArg::Float(value) if value.is_finite() => return Some(*value as f64),
+            OscArg::Double(value) if value.is_finite() => return Some(*value),
             OscArg::Bool(value) => return Some(if *value { 1.0 } else { 0.0 }),
             _ => {}
         }
@@ -164,7 +208,8 @@ mod tests {
     fn osc_message_unsupported(address: &str) -> Vec<u8> {
         let mut msg = Vec::new();
         write_osc_string(&mut msg, address);
-        write_osc_string(&mut msg, ",d");
+        write_osc_string(&mut msg, ",m");
+        msg.extend_from_slice(&[0, 0, 0, 0]);
         msg
     }
 

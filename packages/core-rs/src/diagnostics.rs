@@ -14,6 +14,10 @@ pub struct VrchatDiagnostics {
     pub latest_log_path: Option<PathBuf>,
     pub osc_start_failure: Option<String>,
     pub oscquery_port_from_logs: Option<u16>,
+    pub osc_launch_arg: Option<String>,
+    pub osc_input_port: Option<u16>,
+    pub osc_output_host: Option<String>,
+    pub osc_output_port: Option<u16>,
     pub errors: Vec<String>,
 }
 
@@ -76,6 +80,10 @@ pub fn collect_vrchat_diagnostics(config_dir_override: Option<&Path>) -> VrchatD
                 Ok(scan) => {
                     out.osc_start_failure = scan.osc_start_failure;
                     out.oscquery_port_from_logs = scan.oscquery_port;
+                    out.osc_launch_arg = scan.osc_launch_arg;
+                    out.osc_input_port = scan.osc_input_port;
+                    out.osc_output_host = scan.osc_output_host;
+                    out.osc_output_port = scan.osc_output_port;
                 }
                 Err(err) => out
                     .errors
@@ -99,6 +107,10 @@ pub fn collect_vrchat_diagnostics(config_dir_override: Option<&Path>) -> VrchatD
 pub struct VrchatLogScan {
     pub osc_start_failure: Option<String>,
     pub oscquery_port: Option<u16>,
+    pub osc_launch_arg: Option<String>,
+    pub osc_input_port: Option<u16>,
+    pub osc_output_host: Option<String>,
+    pub osc_output_port: Option<u16>,
 }
 
 pub fn scan_vrchat_log(path: &Path) -> Result<VrchatLogScan, String> {
@@ -129,8 +141,55 @@ pub fn scan_vrchat_log(path: &Path) -> Result<VrchatLogScan, String> {
         if let Some(port) = extract_oscquery_port_from_log_line(&line) {
             scan.oscquery_port = Some(port);
         }
+        if let Some(config) = extract_osc_launch_config_from_log_line(line) {
+            scan.osc_launch_arg = Some(config.raw);
+            scan.osc_input_port = Some(config.input_port);
+            scan.osc_output_host = Some(config.output_host);
+            scan.osc_output_port = Some(config.output_port);
+        }
     }
     Ok(scan)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OscLaunchConfig {
+    pub raw: String,
+    pub input_port: u16,
+    pub output_host: String,
+    pub output_port: u16,
+}
+
+pub fn extract_osc_launch_config_from_log_line(line: &str) -> Option<OscLaunchConfig> {
+    let needle = "--osc=";
+    let idx = line.find(needle)?;
+    let rest = &line[(idx + needle.len())..];
+    let token = rest
+        .split_whitespace()
+        .next()?
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    if token.is_empty() {
+        return None;
+    }
+
+    let parts = token.split(':').collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return None;
+    }
+    let input_port = parts.first()?.parse::<u16>().ok()?;
+    let output_port = parts.last()?.parse::<u16>().ok()?;
+    let output_host = parts[1..parts.len() - 1].join(":").trim().to_string();
+    if output_host.is_empty() {
+        return None;
+    }
+
+    Some(OscLaunchConfig {
+        raw: token.to_string(),
+        input_port,
+        output_host,
+        output_port,
+    })
 }
 
 pub fn extract_oscquery_port_from_log_line(line: &str) -> Option<u16> {
@@ -252,6 +311,16 @@ mod tests {
     }
 
     #[test]
+    fn extracts_osc_launch_config_from_log_line() {
+        let line = "Debug - Arg: --osc=6009:127.0.0.1:6010";
+        let parsed = extract_osc_launch_config_from_log_line(line).expect("parsed launch arg");
+        assert_eq!(parsed.input_port, 6009);
+        assert_eq!(parsed.output_host, "127.0.0.1");
+        assert_eq!(parsed.output_port, 6010);
+        assert_eq!(parsed.raw, "6009:127.0.0.1:6010");
+    }
+
+    #[test]
     fn scans_vrchat_log_for_failure_and_port() {
         let tmp_file = std::env::temp_dir().join(format!(
             "vrl_diag_{}_{}.log",
@@ -261,11 +330,15 @@ mod tests {
         let mut file = fs::File::create(&tmp_file).expect("create temp file");
         writeln!(file, "hello").expect("write");
         writeln!(file, "service of type OSCQuery on 39999").expect("write");
+        writeln!(file, "Arg: --osc=6009:127.0.0.1:6010").expect("write");
         writeln!(file, "Could not Start OSC because socket in use").expect("write");
         drop(file);
 
         let scan = scan_vrchat_log(&tmp_file).expect("scan");
         assert_eq!(scan.oscquery_port, Some(39999));
+        assert_eq!(scan.osc_input_port, Some(6009));
+        assert_eq!(scan.osc_output_host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(scan.osc_output_port, Some(6010));
         assert!(scan
             .osc_start_failure
             .as_deref()

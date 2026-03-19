@@ -299,6 +299,11 @@ fn run_loop(
 
             let packet = &packet_buf[..packet_size];
             let sender_ip = from.ip();
+            {
+                let mut lock = snapshot.lock().expect("snapshot mutex poisoned");
+                lock.osc_packets_received += 1;
+                lock.last_osc_from = from.to_string();
+            }
             if !is_sender_allowed(&config, sender_ip) {
                 if blocked_sender_log_once.insert(sender_ip) {
                     push_log(
@@ -354,11 +359,9 @@ fn run_loop(
             }
 
             let mut lock = snapshot.lock().expect("snapshot mutex poisoned");
-            lock.osc_packets_received += 1;
             lock.osc_messages_received += messages.len() as u64;
             lock.mapped_messages_received += mapped_count;
             lock.unmapped_messages_received += unmapped_count;
-            lock.last_osc_from = from.to_string();
         }
 
         let now_ms = unix_ms_now();
@@ -512,9 +515,11 @@ fn param_key_from_address(address: &str) -> String {
 fn first_arg_to_runtime_value(args: &[OscArg]) -> Option<RuntimeParamValue> {
     match args.first() {
         Some(OscArg::Int(value)) => Some(RuntimeParamValue::Number(*value as f64)),
+        Some(OscArg::Int64(value)) => Some(RuntimeParamValue::Number(*value as f64)),
         Some(OscArg::Float(value)) if value.is_finite() => {
             Some(RuntimeParamValue::Number(*value as f64))
         }
+        Some(OscArg::Double(value)) if value.is_finite() => Some(RuntimeParamValue::Number(*value)),
         Some(OscArg::Bool(value)) => Some(RuntimeParamValue::Bool(*value)),
         Some(OscArg::Str(value)) => Some(RuntimeParamValue::Text(value.clone())),
         _ => None,
@@ -541,8 +546,11 @@ fn update_avatar_param_cache(
 fn format_osc_arg_value(value: &OscArg) -> String {
     match value {
         OscArg::Int(v) => v.to_string(),
+        OscArg::Int64(v) => v.to_string(),
         OscArg::Float(v) if v.is_finite() => format!("{v:.6}"),
         OscArg::Float(_) => "NaN".to_string(),
+        OscArg::Double(v) if v.is_finite() => format!("{v:.6}"),
+        OscArg::Double(_) => "NaN".to_string(),
         OscArg::Bool(v) => v.to_string(),
         OscArg::Str(v) => format!("{v:?}"),
     }
