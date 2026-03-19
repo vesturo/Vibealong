@@ -2,10 +2,9 @@
 /target/
 
 # Local app/runtime data
-/data/*.sqlite
-/data/*.db
-/data/*.txt
-
+/data/*
+/docs/*
+scripts/*
 # Local caches and scratch dirs
 /.cache/
 /.tmp/

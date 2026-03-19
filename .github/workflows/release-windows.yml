@@ -1,4 +1,4 @@
-name: Release Windows EXE
+name: Build and Release Windows EXE
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Optional version label for artifact naming (example: v0.1.0-dev1)"
+        description: "Optional version label for manual artifact naming (example: v0.1.1)"
         required: false
         type: string
 
@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -39,37 +41,20 @@ jobs:
         run: |
           if ($env:GITHUB_REF -like "refs/tags/*") {
             $version = $env:GITHUB_REF_NAME
-            $releaseTag = $version
-            $releaseName = "Vibealong $version"
-            $prerelease = "false"
-            $generateNotes = "true"
-          } elseif ($env:GITHUB_EVENT_NAME -eq "push") {
-            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-            $branch = $env:GITHUB_REF_NAME -replace '[^A-Za-z0-9._-]', '-'
-            $version = "$branch-$stamp-$shortSha"
-            $releaseTag = "release-$version"
-            $releaseName = "Vibealong $version"
-            $prerelease = "false"
-            $generateNotes = "true"
           } elseif ("${{ inputs.version }}" -ne "") {
             $version = "${{ inputs.version }}"
-            $releaseTag = "manual-$version"
-            $releaseName = "Vibealong Manual $version"
-            $prerelease = "true"
-            $generateNotes = "false"
           } else {
-            $version = "manual-" + (Get-Date -Format "yyyyMMddHHmmss")
-            $releaseTag = "manual-$version"
-            $releaseName = "Vibealong Manual $version"
-            $prerelease = "true"
-            $generateNotes = "false"
+            $cargoToml = Get-Content "packages/core-rs/Cargo.toml" -Raw
+            $match = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"\s*$')
+            if ($match.Success) {
+              $crateVersion = $match.Groups[1].Value
+            } else {
+              $crateVersion = "0.0.0"
+            }
+            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+            $version = "v$crateVersion-main-$shortSha"
           }
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "release_tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "release_name=$releaseName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "generate_notes=$generateNotes" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Package artifacts and checksums
         shell: pwsh
@@ -98,15 +83,36 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'push'
+      - name: Build release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/')
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.TrimStart('v')
+          $content = Get-Content "CHANGELOG.md" -Raw
+          $pattern = "(?ms)^## \[$([regex]::Escape($version))\][\s\S]*?(?=^## \[|\z)"
+          $match = [regex]::Match($content, $pattern)
+
+          if ($match.Success) {
+            $notes = $match.Value.Trim()
+          } else {
+            $notes = "Release $tag`n`nNo matching CHANGELOG section found for [$version]."
+          }
+
+          $notesPath = "dist/RELEASE_NOTES.md"
+          $notes | Out-File -FilePath $notesPath -Encoding utf8
+          "notes_path=$notesPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.release_tag }}
+          tag_name: ${{ github.ref_name }}
           target_commitish: ${{ github.sha }}
-          name: ${{ steps.meta.outputs.release_name }}
-          prerelease: ${{ steps.meta.outputs.prerelease }}
-          generate_release_notes: ${{ steps.meta.outputs.generate_notes }}
+          name: Vibealong ${{ github.ref_name }}
+          prerelease: false
+          body_path: ${{ steps.notes.outputs.notes_path }}
           files: |
             dist/Vibealong-${{ steps.meta.outputs.version }}.exe
             dist/Vibealong-${{ steps.meta.outputs.version }}-windows-x64.zip

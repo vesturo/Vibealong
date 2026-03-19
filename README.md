@@ -43,8 +43,9 @@ target/release/vibealong.exe
 ## Release process
 
 - Tag format: `vX.Y.Z` (example: `v0.1.0`)
-- Push tag
-- GitHub Actions builds and publishes:
+- Every push to `main` builds Windows artifacts (workflow artifacts only).
+- Push a version tag to publish a public GitHub Release.
+- Tagged release publishes:
   - `Vibealong-vX.Y.Z.exe`
   - `Vibealong-vX.Y.Z-windows-x64.zip`
   - `SHA256SUMS.txt`
